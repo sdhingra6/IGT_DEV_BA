@@ -1,0 +1,175 @@
+image: $CI_REGISTRY/$CI_PROJECT_PATH/igt-fedora:latest
+variables:
+  MESON_OPTIONS: >
+    -Dwith_libdrm=intel,nouveau,amdgpu
+    -Dbuild_overlay=true
+    -Dbuild_audio=true
+    -Dbuild_chamelium=true
+    -Dwith_valgrind=true
+    -Dbuild_man=true
+    -Dbuild_tests=true
+    -Dbuild_runner=true
+    -Dwith_libunwind=true
+
+stages:
+  - containers
+  - build
+  - test
+  - deploy
+
+#################### BUILD #########################
+
+build:tests-fedora:
+  stage: build
+  script:
+    - meson $MESON_OPTIONS build
+    - ninja -C build
+    - ninja -C build igt-gpu-tools-doc
+  artifacts:
+    paths:
+      - build
+
+build:tests-fedora-no-libunwind:
+  stage: build
+  script:
+    - dnf remove -y libunwind-devel
+    - meson -Dlibunwind=false build
+    - ninja -C build
+
+# documentation building is different with meson<0.47
+build:tests-fedora-oldest-meson:
+  stage: build
+  script:
+    - dnf remove -y meson
+    - pip3 install /usr/src/meson-*.tar.gz
+    - meson $MESON_OPTIONS build
+    - ninja -C build
+    - ninja -C build igt-gpu-tools-doc
+
+build:tests-debian-meson:
+  image: $CI_REGISTRY/$CI_PROJECT_PATH/igt-debian:latest
+  stage: build
+  script:
+    - meson $MESON_OPTIONS build
+    - ninja -C build
+    - cp build/tests/test-list.txt meson-test-list.txt
+  artifacts:
+    paths:
+      - meson-test-list.txt
+
+build:tests-debian-meson-arm64:
+  image: $CI_REGISTRY/$CI_PROJECT_PATH/igt-debian-arm64:latest
+  stage: build
+  script:
+    - PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig/ meson --cross-file meson-cross-arm64.txt build
+    - ninja -C build
+  artifacts:
+    paths:
+      - build
+
+build:tests-debian-autotools:
+  image: $CI_REGISTRY/$CI_PROJECT_PATH/igt-debian:latest
+  stage: build
+  script:
+    - ./autogen.sh --enable-{chamelium,audio,intel,amdgpu,nouveau,tests,runner}
+    - make -j
+    - cp tests/test-list.txt autotools-test-list.txt
+  artifacts:
+    paths:
+      - autotools-test-list.txt
+
+#################### TEST ##########################
+
+test:ninja-test:
+  dependencies:
+    - build:tests-fedora
+  stage: test
+  script: ninja -C build test
+
+test:ninja-test-arm64:
+  image: $CI_REGISTRY/$CI_PROJECT_PATH/igt-debian-arm64:latest
+  dependencies:
+    - build:tests-debian-meson-arm64
+  stage: test
+  script:
+    - env > build/envdump.txt
+    - ninja -C build test
+  artifacts:
+    paths:
+      - build
+    when: on_failure
+
+test:test-list-diff:
+  dependencies:
+    - build:tests-debian-autotools
+    - build:tests-debian-meson
+  stage: test
+  script: diff <(sed "s/ /\n/g" meson-test-list.txt| sort) <(sed "s/ /\n/g" autotools-test-list.txt | sort) 
+
+################### DEPLOY #########################
+
+pages:
+  dependencies:
+    - build:tests-fedora
+  stage: deploy
+  script:
+    - ninja -C build igt-gpu-tools-doc
+    - cp -r build/docs/reference/igt-gpu-tools/html public
+  artifacts:
+    paths:
+      - public
+  only:
+    - master
+
+################# CONTAINERS #######################
+
+containers:igt-debian:
+  stage: containers
+  image: docker:stable
+  only:
+    changes:
+      - Dockerfile.debian
+      - .gitlab-ci.yml
+  services:
+    - docker:dind
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_DRIVER: overlay2
+  script:
+    - docker login -u gitlab-ci-token -p $CI_JOB_TOKEN $CI_REGISTRY
+    - docker build -t $CI_REGISTRY/$CI_PROJECT_PATH/igt-debian -f Dockerfile.debian .
+    - docker push $CI_REGISTRY/$CI_PROJECT_PATH/igt-debian
+
+containers:igt-debian-arm64:
+  stage: containers
+  image: docker:stable
+  only:
+    changes:
+      - Dockerfile.debian-arm64
+      - .gitlab-ci.yml
+  services:
+    - docker:dind
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_DRIVER: overlay2
+  script:
+    - docker login -u gitlab-ci-token -p $CI_JOB_TOKEN $CI_REGISTRY
+    - docker build -t $CI_REGISTRY/$CI_PROJECT_PATH/igt-debian-arm64 -f Dockerfile.debian-arm64 .
+    - docker push $CI_REGISTRY/$CI_PROJECT_PATH/igt-debian-arm64
+
+containers:igt-fedora:
+  stage: containers
+  image: docker:stable
+  only:
+    changes:
+      - Dockerfile.fedora
+      - .gitlab-ci.yml
+  services:
+    - docker:dind
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_DRIVER: overlay2
+  script:
+    - docker login -u gitlab-ci-token -p $CI_JOB_TOKEN $CI_REGISTRY
+    - docker build -t $CI_REGISTRY/$CI_PROJECT_PATH/igt-fedora -f Dockerfile.fedora .
+    - docker push $CI_REGISTRY/$CI_PROJECT_PATH/igt-fedora
